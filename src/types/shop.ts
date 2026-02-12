@@ -115,6 +115,11 @@ export interface CheckoutRequest {
     photo_id?: string;
     price?: number;
     price_cents?: number;
+    priceCents?: number;
+    unit_amount?: number;
+    unitAmount?: number;
+    amount_cents?: number;
+    amountCents?: number;
     quantity: number;
     type?: string;
     name?: string;

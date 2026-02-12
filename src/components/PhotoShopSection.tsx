@@ -61,6 +61,10 @@ function dayPassStorageKey(userId: string): string {
   return `plose_day_pass_cart_${PLOSE_PARK_ID}_${userId}`;
 }
 
+function pendingCheckoutStorageKey(userId: string): string {
+  return `plose_pending_checkout_${PLOSE_PARK_ID}_${userId}`;
+}
+
 type MessageState = {
   state: UiState;
   message: string | null;
@@ -1158,13 +1162,16 @@ export function PhotoShopSection() {
   const loadPurchasesAndUnlocks = useCallback(
     async (userId: string, parkId: string = PLOSE_PARK_ID) => {
       if (!supabase) return;
+      const sb = supabase;
 
       type UnlockedWithPhotoRow = UnlockedPhoto & {
         photos?: Photo | Photo[] | null;
       };
 
-      const [unlockJoinResult, purchaseResult] = await Promise.all([
-        supabase
+      const parkFilter = `park_id.eq.${parkId},park_id.is.null`;
+
+      const fetchUnlockJoin = (withParkFilter: boolean) => {
+        let query = sb
           .from('unlocked_photos')
           .select(`
             *,
@@ -1184,19 +1191,48 @@ export function PhotoShopSection() {
               stripe_price_id
             )
           `)
-          .eq('user_id', userId)
-          .or(`park_id.eq.${parkId},park_id.is.null`)
-          .order('unlocked_at', { ascending: false }),
-        supabase
-          .from('purchases')
-          .select('*')
-          .eq('user_id', userId)
-          .or(`park_id.eq.${parkId},park_id.is.null`)
-          .order('created_at', { ascending: false }),
+          .eq('user_id', userId);
+
+        if (withParkFilter) {
+          query = query.or(parkFilter);
+        }
+
+        return query.order('unlocked_at', { ascending: false });
+      };
+
+      const fetchPurchases = (withParkFilter: boolean) => {
+        let query = sb.from('purchases').select('*').eq('user_id', userId);
+        if (withParkFilter) {
+          query = query.or(parkFilter);
+        }
+        return query.order('created_at', { ascending: false });
+      };
+
+      let [unlockJoinResult, purchaseResult] = await Promise.all([
+        fetchUnlockJoin(true),
+        fetchPurchases(true),
       ]);
+
+      const unlockJoinRows = (unlockJoinResult.data ?? []) as UnlockedWithPhotoRow[];
+      const purchaseRows = (purchaseResult.data ?? []) as Purchase[];
+
+      if (!unlockJoinResult.error && unlockJoinRows.length === 0) {
+        const fallbackUnlockJoin = await fetchUnlockJoin(false);
+        if (!fallbackUnlockJoin.error && (fallbackUnlockJoin.data ?? []).length > 0) {
+          unlockJoinResult = fallbackUnlockJoin;
+        }
+      }
+
+      if (!purchaseResult.error && purchaseRows.length === 0) {
+        const fallbackPurchases = await fetchPurchases(false);
+        if (!fallbackPurchases.error && (fallbackPurchases.data ?? []).length > 0) {
+          purchaseResult = fallbackPurchases;
+        }
+      }
 
       let unlockRows: UnlockedPhoto[] = [];
       let purchasedFromUnlocks: Photo[] = [];
+      let purchasedFromPurchaseItems: Photo[] = [];
 
       if (!unlockJoinResult.error) {
         const joinedRows = (unlockJoinResult.data ?? []) as UnlockedWithPhotoRow[];
@@ -1208,12 +1244,24 @@ export function PhotoShopSection() {
           .map((photo) => normalizePhotoForShop(photo, stripeDemoPriceId));
       } else {
         // Fallback if PostgREST relation join "unlocked_photos -> photos" is not available in this project.
-        const { data: unlockOnlyRows, error: unlockOnlyError } = await supabase
-          .from('unlocked_photos')
-          .select('*')
-          .eq('user_id', userId)
-          .or(`park_id.eq.${parkId},park_id.is.null`)
-          .order('unlocked_at', { ascending: false });
+        const fetchUnlockOnly = (withParkFilter: boolean) => {
+          let query = sb.from('unlocked_photos').select('*').eq('user_id', userId);
+          if (withParkFilter) {
+            query = query.or(parkFilter);
+          }
+          return query.order('unlocked_at', { ascending: false });
+        };
+
+        let unlockOnlyResult = await fetchUnlockOnly(true);
+        if (!unlockOnlyResult.error && ((unlockOnlyResult.data ?? []) as UnlockedPhoto[]).length === 0) {
+          const fallbackUnlockOnly = await fetchUnlockOnly(false);
+          if (!fallbackUnlockOnly.error && (fallbackUnlockOnly.data ?? []).length > 0) {
+            unlockOnlyResult = fallbackUnlockOnly;
+          }
+        }
+
+        const unlockOnlyRows = unlockOnlyResult.data;
+        const unlockOnlyError = unlockOnlyResult.error;
 
         if (unlockOnlyError) {
           setCartState({
@@ -1221,55 +1269,128 @@ export function PhotoShopSection() {
             message: null,
             error: toApiError(unlockOnlyError, 'Freischaltungen konnten nicht geladen werden.'),
           });
-          return;
-        }
+          unlockRows = [];
+        } else {
+          unlockRows = (unlockOnlyRows ?? []) as UnlockedPhoto[];
 
-        unlockRows = (unlockOnlyRows ?? []) as UnlockedPhoto[];
+          const unlockedPhotoIds = [...new Set(
+            unlockRows
+              .map((row) => row.photo_id ?? null)
+              .filter((photoId): photoId is string => Boolean(photoId))
+          )];
 
-        const unlockedPhotoIds = [...new Set(
-          unlockRows
-            .map((row) => row.photo_id ?? null)
-            .filter((photoId): photoId is string => Boolean(photoId))
-        )];
+          if (unlockedPhotoIds.length > 0) {
+            const { data: unlockedPhotoRows, error: unlockedPhotoError } = await sb
+              .from('photos')
+              .select('*')
+              .in('id', unlockedPhotoIds);
 
-        if (unlockedPhotoIds.length > 0) {
-          const { data: unlockedPhotoRows, error: unlockedPhotoError } = await supabase
-            .from('photos')
-            .select('*')
-            .in('id', unlockedPhotoIds);
+            if (unlockedPhotoError) {
+              setCartState({
+                state: 'error',
+                message: null,
+                error: toApiError(unlockedPhotoError, 'Freigeschaltete Fotos konnten nicht geladen werden.'),
+              });
+            } else {
+              const photoById = new Map(
+                ((unlockedPhotoRows ?? []) as Photo[])
+                  .map((photo) => normalizePhotoForShop(photo, stripeDemoPriceId))
+                  .map((photo) => [photo.id, photo] as const)
+              );
 
-          if (unlockedPhotoError) {
-            setCartState({
-              state: 'error',
-              message: null,
-              error: toApiError(unlockedPhotoError, 'Freigeschaltete Fotos konnten nicht geladen werden.'),
-            });
-            return;
+              purchasedFromUnlocks = unlockedPhotoIds
+                .map((photoId) => photoById.get(photoId) ?? null)
+                .filter((photo): photo is Photo => Boolean(photo));
+            }
           }
-
-          const photoById = new Map(
-            ((unlockedPhotoRows ?? []) as Photo[])
-              .map((photo) => normalizePhotoForShop(photo, stripeDemoPriceId))
-              .map((photo) => [photo.id, photo] as const)
-          );
-
-          purchasedFromUnlocks = unlockedPhotoIds
-            .map((photoId) => photoById.get(photoId) ?? null)
-            .filter((photo): photo is Photo => Boolean(photo));
         }
       }
 
       setUnlockedPhotos(unlockRows);
 
+      const purchaseRowsFinal = (purchaseResult.data ?? []) as Purchase[];
+      const purchaseIds = [...new Set(
+        purchaseRowsFinal
+          .map((row) => (typeof row.id === 'string' ? row.id : null))
+          .filter((id): id is string => Boolean(id))
+      )];
+
+      if (purchaseIds.length > 0) {
+        const { data: purchaseItemsRows, error: purchaseItemsError } = await sb
+          .from('purchase_items')
+          .select('*')
+          .in('purchase_id', purchaseIds)
+          .order('created_at', { ascending: false });
+
+        if (!purchaseItemsError) {
+          const purchaseItemPhotoIds = [...new Set(
+            ((purchaseItemsRows ?? []) as Array<{ photo_id?: string | null }>)
+              .map((row) => (typeof row.photo_id === 'string' ? row.photo_id : null))
+              .filter((id): id is string => Boolean(id))
+          )];
+
+          if (purchaseItemPhotoIds.length > 0) {
+            const { data: purchaseItemPhotosRows, error: purchaseItemPhotosError } = await sb
+              .from('photos')
+              .select('*')
+              .in('id', purchaseItemPhotoIds);
+
+            if (!purchaseItemPhotosError) {
+              purchasedFromPurchaseItems = ((purchaseItemPhotosRows ?? []) as Photo[]).map((photo) =>
+                normalizePhotoForShop(photo, stripeDemoPriceId)
+              );
+            }
+          }
+        }
+      }
+
       const uniquePurchasedPhotos: Photo[] = [];
       const seenPhotoIds = new Set<string>();
-      for (const photo of purchasedFromUnlocks) {
+      for (const photo of [...purchasedFromUnlocks, ...purchasedFromPurchaseItems]) {
         if (seenPhotoIds.has(photo.id)) continue;
         seenPhotoIds.add(photo.id);
         uniquePurchasedPhotos.push(photo);
       }
 
+      if (uniquePurchasedPhotos.length === 0 && typeof window !== 'undefined') {
+        const rawPending = window.localStorage.getItem(pendingCheckoutStorageKey(userId));
+        if (rawPending) {
+          try {
+            const parsed = JSON.parse(rawPending) as { photoIds?: unknown; createdAt?: unknown };
+            const photoIds = Array.isArray(parsed.photoIds)
+              ? parsed.photoIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+              : [];
+            const createdAt =
+              typeof parsed.createdAt === 'number' ? parsed.createdAt : Number(parsed.createdAt ?? 0);
+            const isFresh = Number.isFinite(createdAt) && Date.now() - createdAt < 1000 * 60 * 60 * 2;
+
+            if (isFresh && photoIds.length > 0) {
+              const { data: pendingPhotosRows, error: pendingPhotosError } = await sb
+                .from('photos')
+                .select('*')
+                .in('id', photoIds);
+
+              if (!pendingPhotosError) {
+                for (const photo of (pendingPhotosRows ?? []) as Photo[]) {
+                  if (seenPhotoIds.has(photo.id)) continue;
+                  seenPhotoIds.add(photo.id);
+                  uniquePurchasedPhotos.push(normalizePhotoForShop(photo, stripeDemoPriceId));
+                }
+              }
+            } else if (!isFresh) {
+              window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
+            }
+          } catch {
+            window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
+          }
+        }
+      }
+
       setPurchasedPhotos(uniquePurchasedPhotos);
+
+      if (uniquePurchasedPhotos.length > 0 && typeof window !== 'undefined') {
+        window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
+      }
 
       if (purchaseResult.error) {
         // Keep purchased image rendering working from unlocked_photos even if purchases query fails.
@@ -1685,15 +1806,17 @@ export function PhotoShopSection() {
   }, [hydratePhotoUrls, photosForUrlHydration]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser || !supabase) return;
+    const sb = supabase;
 
     const params = new URLSearchParams(window.location.search);
     const checkoutStateParam = params.get('checkout');
     if (!checkoutStateParam) return;
 
     const timers: number[] = [];
+    const baselineUnlockedCount = unlockedPhotos.length;
 
-      if (checkoutStateParam === 'success') {
+    if (checkoutStateParam === 'success') {
       setDayPassInCart(false);
       if (typeof window !== 'undefined') {
         window.localStorage.removeItem(dayPassStorageKey(currentUser.id));
@@ -1704,7 +1827,7 @@ export function PhotoShopSection() {
         error: null,
       });
 
-      const delaysMs = [2000, 4000, 7000, 10000];
+      const delaysMs = [2000, 5000, 10000, 15000, 25000, 40000, 60000];
       delaysMs.forEach((delay) => {
         const timerId = window.setTimeout(() => {
           void Promise.all([
@@ -1712,6 +1835,25 @@ export function PhotoShopSection() {
             loadPurchasesAndUnlocks(currentUser.id),
             loadLeaderboard(),
           ]);
+
+          if (delay === 60000) {
+            void (async () => {
+              const { count } = await sb
+                .from('unlocked_photos')
+                .select('*', { count: 'exact', head: true })
+                .eq('user_id', currentUser.id)
+                .or(`park_id.eq.${PLOSE_PARK_ID},park_id.is.null`);
+
+              if ((count ?? 0) <= baselineUnlockedCount) {
+                setCheckoutState({
+                  state: 'success',
+                  message:
+                    'Zahlung erfolgreich. Freischaltung kann bis zu 1-2 Minuten dauern. Bitte kurz warten und dann aktualisieren.',
+                  error: null,
+                });
+              }
+            })();
+          }
         }, delay);
         timers.push(timerId);
       });
@@ -1731,7 +1873,7 @@ export function PhotoShopSection() {
     return () => {
       timers.forEach((id) => window.clearTimeout(id));
     };
-  }, [currentUser, loadCart, loadLeaderboard, loadPurchasesAndUnlocks]);
+  }, [currentUser, loadCart, loadLeaderboard, loadPurchasesAndUnlocks, supabase, unlockedPhotos.length]);
 
   const unlockedPhotoIds = useMemo(
     () =>
@@ -1741,6 +1883,11 @@ export function PhotoShopSection() {
           .filter((id): id is string => Boolean(id))
       ),
     [unlockedPhotos]
+  );
+
+  const purchasedPhotoIds = useMemo(
+    () => new Set(purchasedPhotos.map((photo) => photo.id)),
+    [purchasedPhotos]
   );
 
   const unlockedDayKeys = useMemo(
@@ -1776,11 +1923,12 @@ export function PhotoShopSection() {
 
   const isPhotoUnlocked = useCallback(
     (photo: Photo) => {
+      if (purchasedPhotoIds.has(photo.id)) return true;
       if (unlockedPhotoIds.has(photo.id)) return true;
       const day = photoDayKey(photo);
       return Boolean(day && unlockedDayKeys.has(day));
     },
-    [unlockedDayKeys, unlockedPhotoIds]
+    [purchasedPhotoIds, unlockedDayKeys, unlockedPhotoIds]
   );
 
   const myTopSpeed = useMemo(() => {
@@ -2108,14 +2256,51 @@ export function PhotoShopSection() {
     return Math.max(...candidates);
   }, [leaderboardOwnTopSpeed, myTodayTopSpeed, myTopSpeed]);
 
+  const cartItemUnitCents = useCallback((item: CartItem): number => {
+    const candidates: unknown[] = [
+      item.photo?.price_cents,
+      (item as unknown as { price_cents?: unknown }).price_cents,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        const rounded = Math.round(candidate);
+        if (rounded > 0) return rounded;
+      }
+      if (typeof candidate === 'string') {
+        const parsed = Number(candidate.replace(',', '.').trim());
+        if (Number.isFinite(parsed)) {
+          const rounded = Math.round(parsed);
+          if (rounded > 0) return rounded;
+        }
+      }
+    }
+
+    return 499;
+  }, []);
+
+  const cartItemQuantity = useCallback((item: CartItem): number => {
+    const value = item.quantity;
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.round(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.round(parsed);
+      }
+    }
+    return 1;
+  }, []);
+
   const cartTotalCents = useMemo(
     () =>
       cartItems.reduce((acc, item) => {
-        const unit = typeof item.photo?.price_cents === 'number' ? item.photo.price_cents : 499;
-        const quantity = typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1;
+        const unit = cartItemUnitCents(item);
+        const quantity = cartItemQuantity(item);
         return acc + unit * quantity;
       }, 0) + (dayPassInCart ? DAY_PASS_PRICE_CENTS : 0),
-    [cartItems, dayPassInCart]
+    [cartItemQuantity, cartItemUnitCents, cartItems, dayPassInCart]
   );
 
   const performAuth = useCallback(async () => {
@@ -2475,15 +2660,38 @@ export function PhotoShopSection() {
     const successUrl = `${window.location.origin}${window.location.pathname}?checkout=success&session_id={CHECKOUT_SESSION_ID}`;
     const cancelUrl = `${window.location.origin}${window.location.pathname}?checkout=cancel`;
 
+    const toPositiveInt = (value: unknown, fallback: number): number => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        const rounded = Math.round(value);
+        return rounded > 0 ? rounded : fallback;
+      }
+      if (typeof value === 'string') {
+        const normalized = value.replace(',', '.').trim();
+        const parsed = Number(normalized);
+        if (Number.isFinite(parsed)) {
+          const rounded = Math.round(parsed);
+          return rounded > 0 ? rounded : fallback;
+        }
+      }
+      return fallback;
+    };
+
     const checkoutItems: NonNullable<CheckoutRequest['items']> = cartItems.map((item) => {
-      const unitCents = typeof item.photo?.price_cents === 'number' ? item.photo.price_cents : 499;
-      const quantity = typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1;
+      const rawPriceCents = (item.photo?.price_cents as unknown) ?? 499;
+      const unitCents = toPositiveInt(rawPriceCents, 499);
+      const quantity = toPositiveInt(item.quantity, 1);
       const photoLabel = `Foto ${item.photo_id.slice(0, 8)}`;
+      const priceEuro = Number((unitCents / 100).toFixed(2));
       return {
         photoId: item.photo_id,
         photo_id: item.photo_id,
-        price: unitCents / 100,
+        price: priceEuro,
         price_cents: unitCents,
+        priceCents: unitCents,
+        unit_amount: unitCents,
+        unitAmount: unitCents,
+        amount_cents: unitCents,
+        amountCents: unitCents,
         quantity,
         type: 'photo',
         name: photoLabel,
@@ -2494,8 +2702,13 @@ export function PhotoShopSection() {
     });
     if (dayPassInCart) {
       checkoutItems.push({
-        price: DAY_PASS_PRICE_CENTS / 100,
+        price: Number((DAY_PASS_PRICE_CENTS / 100).toFixed(2)),
         price_cents: DAY_PASS_PRICE_CENTS,
+        priceCents: DAY_PASS_PRICE_CENTS,
+        unit_amount: DAY_PASS_PRICE_CENTS,
+        unitAmount: DAY_PASS_PRICE_CENTS,
+        amount_cents: DAY_PASS_PRICE_CENTS,
+        amountCents: DAY_PASS_PRICE_CENTS,
         quantity: 1,
         type: 'day_pass',
         name: 'Tagesfotopass',
@@ -2503,6 +2716,29 @@ export function PhotoShopSection() {
         parkId: PLOSE_PARK_ID,
         park_id: PLOSE_PARK_ID,
       });
+    }
+
+    const invalidItem = checkoutItems.find((item) => {
+      const cents =
+        typeof item.unit_amount === 'number'
+          ? item.unit_amount
+          : typeof item.price_cents === 'number'
+            ? item.price_cents
+            : NaN;
+      return !Number.isFinite(cents) || cents <= 0 || Math.floor(cents) !== cents;
+    });
+
+    if (invalidItem) {
+      setCheckoutState({
+        state: 'error',
+        message: null,
+        error: {
+          code: 'invalid_checkout_amount',
+          message: 'Ungültiger Preiswert erkannt (NaN/leer). Bitte Seite neu laden und erneut versuchen.',
+          details: invalidItem,
+        },
+      });
+      return;
     }
 
     const request: CheckoutRequest = {
@@ -2602,6 +2838,22 @@ export function PhotoShopSection() {
       ) ?? null;
 
     if (redirectUrl) {
+      if (typeof window !== 'undefined' && cartItems.length > 0) {
+        const photoIdsForPending = [...new Set(
+          cartItems
+            .map((item) => (typeof item.photo_id === 'string' ? item.photo_id : null))
+            .filter((id): id is string => Boolean(id))
+        )];
+        if (photoIdsForPending.length > 0) {
+          window.localStorage.setItem(
+            pendingCheckoutStorageKey(currentUser.id),
+            JSON.stringify({
+              photoIds: photoIdsForPending,
+              createdAt: Date.now(),
+            })
+          );
+        }
+      }
       window.location.href = redirectUrl;
       return;
     }
@@ -3640,7 +3892,13 @@ export function PhotoShopSection() {
                   </button>
                   <button
                     onClick={() => {
-                      void Promise.all([loadRides(), loadPhotos()]);
+                      void Promise.all([
+                        loadRides(),
+                        loadPhotos(),
+                        ...(currentUser
+                          ? [loadCart(currentUser.id), loadPurchasesAndUnlocks(currentUser.id), loadLeaderboard()]
+                          : []),
+                      ]);
                     }}
                     className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 hover:bg-gray-100"
                   >
@@ -4213,9 +4471,9 @@ export function PhotoShopSection() {
                         <div>
                           <p className="text-sm font-medium">Foto</p>
                           <p className="text-xs text-slate-300">
-                            Menge {typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1}
+                            Menge {cartItemQuantity(item)}
                           </p>
-                          <p className="text-xs text-slate-300">{formatPrice(item.photo?.price_cents)}</p>
+                          <p className="text-xs text-slate-300">{formatPrice(cartItemUnitCents(item))}</p>
                         </div>
                         <button
                           onClick={() => {
