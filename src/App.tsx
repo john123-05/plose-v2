@@ -1,7 +1,7 @@
 import { Camera, Calendar, ShoppingBag, ChevronDown, Medal, Gauge, Clock3, QrCode, Download, Share2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { PhotoShopSection } from './components/PhotoShopSection';
-import { supabase } from './lib/supabase';
+import { createEphemeralSupabaseClient, supabase } from './lib/supabase';
 import type { LeaderboardEntry } from './types/shop';
 
 const PLOSE_PARK_ID = 'ef4ceae9-f2e2-4f8f-b681-2927c90ceb42';
@@ -395,15 +395,36 @@ function App() {
       }
     };
 
+    const initialCachedRows = readCachedRanking();
+    if (initialCachedRows.length > 0) {
+      setPublicRanking(initialCachedRows);
+      setRankingLoadError(null);
+    }
+
     const loadPublicRanking = async () => {
       const parkToday = dateKeyInTimeZone(new Date(), PLOSE_TIMEZONE);
 
-      const { data, error } = await sb
-        .from('leaderboard_entries')
-        .select('id,user_id,park_id,ride_date,speed_kmh,display_name,avatar_url,created_at')
-        .eq('park_id', PLOSE_PARK_ID)
-        .order('created_at', { ascending: false })
-        .limit(200);
+      const fetchRankingRows = async (client: typeof sb) =>
+        client
+          .from('leaderboard_entries')
+          .select('id,user_id,park_id,ride_date,speed_kmh,display_name,avatar_url,created_at')
+          .eq('park_id', PLOSE_PARK_ID)
+          .order('created_at', { ascending: false })
+          .limit(200);
+
+      let { data, error } = await fetchRankingRows(sb);
+
+      if (error) {
+        const guestClient = createEphemeralSupabaseClient();
+        if (guestClient) {
+          const { error: anonError } = await guestClient.auth.signInAnonymously();
+          if (!anonError) {
+            const guestResult = await fetchRankingRows(guestClient as typeof sb);
+            data = guestResult.data;
+            error = guestResult.error;
+          }
+        }
+      }
 
       if (!active) return;
       if (error) {
