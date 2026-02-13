@@ -193,10 +193,20 @@ function applyLanguageToDom(language: UiLanguage): void {
     const textNode = current as Text;
     const parentTag = textNode.parentElement?.tagName;
     if (parentTag !== 'SCRIPT' && parentTag !== 'STYLE') {
-      const baseline = ORIGINAL_TEXT_BY_NODE.get(textNode) ?? textNode.nodeValue ?? '';
-      if (!ORIGINAL_TEXT_BY_NODE.has(textNode)) {
-        ORIGINAL_TEXT_BY_NODE.set(textNode, baseline);
+      const currentValue = textNode.nodeValue ?? '';
+      const hasBaseline = ORIGINAL_TEXT_BY_NODE.has(textNode);
+      if (!hasBaseline) {
+        ORIGINAL_TEXT_BY_NODE.set(textNode, currentValue);
+      } else {
+        const baseline = ORIGINAL_TEXT_BY_NODE.get(textNode) ?? '';
+        const expectedTranslated = translateText(baseline, language);
+        // If React updated this text node after our last translation pass,
+        // refresh baseline so live values (prices/countdowns) are not reverted.
+        if (currentValue !== expectedTranslated) {
+          ORIGINAL_TEXT_BY_NODE.set(textNode, currentValue);
+        }
       }
+      const baseline = ORIGINAL_TEXT_BY_NODE.get(textNode) ?? currentValue;
       const nextValue = translateText(baseline, language);
       if (textNode.nodeValue !== nextValue) {
         textNode.nodeValue = nextValue;

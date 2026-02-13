@@ -1352,7 +1352,7 @@ export function PhotoShopSection() {
         uniquePurchasedPhotos.push(photo);
       }
 
-      if (uniquePurchasedPhotos.length === 0 && typeof window !== 'undefined') {
+      if (typeof window !== 'undefined') {
         const rawPending = window.localStorage.getItem(pendingCheckoutStorageKey(userId));
         if (rawPending) {
           try {
@@ -1365,16 +1365,35 @@ export function PhotoShopSection() {
             const isFresh = Number.isFinite(createdAt) && Date.now() - createdAt < 1000 * 60 * 60 * 2;
 
             if (isFresh && photoIds.length > 0) {
-              const { data: pendingPhotosRows, error: pendingPhotosError } = await sb
-                .from('photos')
-                .select('*')
-                .in('id', photoIds);
+              const missingPendingPhotoIds = photoIds.filter((id) => !seenPhotoIds.has(id));
 
-              if (!pendingPhotosError) {
-                for (const photo of (pendingPhotosRows ?? []) as Photo[]) {
-                  if (seenPhotoIds.has(photo.id)) continue;
-                  seenPhotoIds.add(photo.id);
-                  uniquePurchasedPhotos.push(normalizePhotoForShop(photo, stripeDemoPriceId));
+              if (missingPendingPhotoIds.length === 0) {
+                window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
+              } else {
+                const { data: pendingPhotosRows, error: pendingPhotosError } = await sb
+                  .from('photos')
+                  .select('*')
+                  .in('id', missingPendingPhotoIds);
+
+                if (!pendingPhotosError) {
+                  for (const photo of (pendingPhotosRows ?? []) as Photo[]) {
+                    if (seenPhotoIds.has(photo.id)) continue;
+                    seenPhotoIds.add(photo.id);
+                    uniquePurchasedPhotos.push(normalizePhotoForShop(photo, stripeDemoPriceId));
+                  }
+
+                  const unresolvedPendingIds = missingPendingPhotoIds.filter((id) => !seenPhotoIds.has(id));
+                  if (unresolvedPendingIds.length === 0) {
+                    window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
+                  } else {
+                    window.localStorage.setItem(
+                      pendingCheckoutStorageKey(userId),
+                      JSON.stringify({
+                        photoIds: unresolvedPendingIds,
+                        createdAt,
+                      })
+                    );
+                  }
                 }
               }
             } else if (!isFresh) {
@@ -1387,10 +1406,6 @@ export function PhotoShopSection() {
       }
 
       setPurchasedPhotos(uniquePurchasedPhotos);
-
-      if (uniquePurchasedPhotos.length > 0 && typeof window !== 'undefined') {
-        window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
-      }
 
       if (purchaseResult.error) {
         // Keep purchased image rendering working from unlocked_photos even if purchases query fails.
@@ -1811,12 +1826,16 @@ export function PhotoShopSection() {
 
     const params = new URLSearchParams(window.location.search);
     const checkoutStateParam = params.get('checkout');
+    const checkoutSessionId = params.get('session_id');
     if (!checkoutStateParam) return;
 
+    let isActive = true;
     const timers: number[] = [];
     const baselineUnlockedCount = unlockedPhotos.length;
 
     if (checkoutStateParam === 'success') {
+      // Return page UX: clear local cart immediately, webhook remains source of truth.
+      setCartItems([]);
       setDayPassInCart(false);
       if (typeof window !== 'undefined') {
         window.localStorage.removeItem(dayPassStorageKey(currentUser.id));
@@ -1827,9 +1846,54 @@ export function PhotoShopSection() {
         error: null,
       });
 
+      if (checkoutSessionId) {
+        void (async () => {
+          for (let attempt = 0; attempt < 12; attempt += 1) {
+            if (!isActive) return;
+
+            const { data, error } = await sb
+              .from('purchases')
+              .select('id,user_id,park_id,stripe_checkout_session_id')
+              .eq('stripe_checkout_session_id', checkoutSessionId)
+              .eq('user_id', currentUser.id)
+              .maybeSingle();
+
+            if (!isActive) return;
+
+            if (!error && data) {
+              await Promise.all([
+                loadCart(currentUser.id),
+                loadPurchasesAndUnlocks(currentUser.id),
+                loadLeaderboard(),
+              ]);
+              if (!isActive) return;
+              setCheckoutState({
+                state: 'success',
+                message: 'Zahlung erfolgreich. Bilder wurden freigeschaltet.',
+                error: null,
+              });
+              return;
+            }
+
+            await new Promise((resolve) => {
+              const timerId = window.setTimeout(resolve, 1500);
+              timers.push(timerId);
+            });
+          }
+
+          if (!isActive) return;
+          setCheckoutState({
+            state: 'success',
+            message: 'Zahlung erfolgreich. Webhook verarbeitet die Freischaltung noch...',
+            error: null,
+          });
+        })();
+      }
+
       const delaysMs = [2000, 5000, 10000, 15000, 25000, 40000, 60000];
       delaysMs.forEach((delay) => {
         const timerId = window.setTimeout(() => {
+          if (!isActive) return;
           void Promise.all([
             loadCart(currentUser.id),
             loadPurchasesAndUnlocks(currentUser.id),
@@ -1844,6 +1908,7 @@ export function PhotoShopSection() {
                 .eq('user_id', currentUser.id)
                 .or(`park_id.eq.${PLOSE_PARK_ID},park_id.is.null`);
 
+              if (!isActive) return;
               if ((count ?? 0) <= baselineUnlockedCount) {
                 setCheckoutState({
                   state: 'success',
@@ -1866,11 +1931,13 @@ export function PhotoShopSection() {
     }
 
     params.delete('checkout');
+    params.delete('session_id');
     const nextSearch = params.toString();
     const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}`;
     window.history.replaceState({}, '', nextUrl);
 
     return () => {
+      isActive = false;
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [currentUser, loadCart, loadLeaderboard, loadPurchasesAndUnlocks, supabase, unlockedPhotos.length]);
