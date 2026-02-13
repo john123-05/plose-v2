@@ -6,6 +6,7 @@ import type { LeaderboardEntry } from './types/shop';
 
 const PLOSE_PARK_ID = 'ef4ceae9-f2e2-4f8f-b681-2927c90ceb42';
 const PLOSE_TIMEZONE = 'Europe/Rome';
+const GUEST_LEADERBOARD_CACHE_KEY = 'plose_guest_leaderboard_v1';
 const PLOSE_AVATAR_BUCKET =
   (import.meta.env.VITE_PLOSE_AVATAR_BUCKET as string | undefined)?.trim() || 'avatars';
 type UiLanguage = 'de' | 'en' | 'it';
@@ -367,6 +368,33 @@ function App() {
 
     let active = true;
 
+    const readCachedRanking = (): LeaderboardEntry[] => {
+      if (typeof window === 'undefined') return [];
+      try {
+        const raw = window.localStorage.getItem(GUEST_LEADERBOARD_CACHE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+          .filter(
+            (entry): entry is LeaderboardEntry =>
+              Boolean(entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string')
+          )
+          .slice(0, 10);
+      } catch {
+        return [];
+      }
+    };
+
+    const writeCachedRanking = (rows: LeaderboardEntry[]) => {
+      if (typeof window === 'undefined') return;
+      try {
+        window.localStorage.setItem(GUEST_LEADERBOARD_CACHE_KEY, JSON.stringify(rows.slice(0, 20)));
+      } catch {
+        // ignore storage write failures
+      }
+    };
+
     const loadPublicRanking = async () => {
       const parkToday = dateKeyInTimeZone(new Date(), PLOSE_TIMEZONE);
 
@@ -379,6 +407,12 @@ function App() {
 
       if (!active) return;
       if (error) {
+        const cachedRows = readCachedRanking();
+        if (cachedRows.length > 0) {
+          setPublicRanking(cachedRows);
+          setRankingLoadError(null);
+          return;
+        }
         setRankingLoadError('Tagesranking konnte gerade nicht geladen werden.');
         return;
       }
@@ -449,8 +483,20 @@ function App() {
         } as LeaderboardEntry;
       });
 
+      if (rows.length === 0) {
+        const cachedRows = readCachedRanking();
+        if (cachedRows.length > 0) {
+          setRankingLoadError(null);
+          setPublicRanking(cachedRows);
+          return;
+        }
+      }
+
       setRankingLoadError(null);
       setPublicRanking(rows);
+      if (rows.length > 0) {
+        writeCachedRanking(rows);
+      }
     };
 
     void loadPublicRanking();
