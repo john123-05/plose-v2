@@ -1351,6 +1351,7 @@ export function PhotoShopSection() {
         seenPhotoIds.add(photo.id);
         uniquePurchasedPhotos.push(photo);
       }
+      const confirmedPhotoIds = new Set<string>(seenPhotoIds);
 
       if (typeof window !== 'undefined') {
         const rawPending = window.localStorage.getItem(pendingCheckoutStorageKey(userId));
@@ -1365,7 +1366,7 @@ export function PhotoShopSection() {
             const isFresh = Number.isFinite(createdAt) && Date.now() - createdAt < 1000 * 60 * 60 * 2;
 
             if (isFresh && photoIds.length > 0) {
-              const missingPendingPhotoIds = photoIds.filter((id) => !seenPhotoIds.has(id));
+              const missingPendingPhotoIds = photoIds.filter((id) => !confirmedPhotoIds.has(id));
 
               if (missingPendingPhotoIds.length === 0) {
                 window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
@@ -1382,7 +1383,9 @@ export function PhotoShopSection() {
                     uniquePurchasedPhotos.push(normalizePhotoForShop(photo, stripeDemoPriceId));
                   }
 
-                  const unresolvedPendingIds = missingPendingPhotoIds.filter((id) => !seenPhotoIds.has(id));
+                  const unresolvedPendingIds = missingPendingPhotoIds.filter(
+                    (id) => !confirmedPhotoIds.has(id)
+                  );
                   if (unresolvedPendingIds.length === 0) {
                     window.localStorage.removeItem(pendingCheckoutStorageKey(userId));
                   } else {
@@ -1941,6 +1944,20 @@ export function PhotoShopSection() {
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [currentUser, loadCart, loadLeaderboard, loadPurchasesAndUnlocks, supabase, unlockedPhotos.length]);
+
+  useEffect(() => {
+    if (checkoutState.state !== 'success') return;
+    if (!checkoutState.message?.toLowerCase().includes('zahlung erfolgreich')) return;
+
+    const timerId = window.setTimeout(() => {
+      setCheckoutState((previous) => {
+        if (previous.state !== 'success') return previous;
+        return initialMessageState();
+      });
+    }, 7000);
+
+    return () => window.clearTimeout(timerId);
+  }, [checkoutState.message, checkoutState.state]);
 
   const unlockedPhotoIds = useMemo(
     () =>
@@ -3942,7 +3959,6 @@ export function PhotoShopSection() {
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
                 <div>
                   <h3 className="text-2xl font-bold text-gray-900">2. Galerie</h3>
-                  <p className="text-sm text-gray-600">Datums-/zeitbasiert, inkl. Kaufstatus und Favoriten.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -4018,13 +4034,7 @@ export function PhotoShopSection() {
                     </button>
                   </div>
                 </>
-              ) : (
-                <p className="text-sm text-gray-600 mb-4">
-                  {currentUser
-                    ? 'Nutze den Button "Finde mein Foto" für Datum/Zeit-Suche.'
-                    : 'Zeigt die 3 neuesten Fotos. Für Kalendersuche bitte einloggen.'}
-                </p>
-              )}
+              ) : null}
 
               {statusText(galleryState) && (
                 <p className={`text-sm mb-3 ${galleryState.error ? 'text-red-600' : 'text-gray-600'}`}>{statusText(galleryState)}</p>
