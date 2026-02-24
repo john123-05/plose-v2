@@ -48,8 +48,8 @@ import type {
 type AuthMode = 'login' | 'signup';
 type SettingsPanel = 'account' | 'profile' | 'newsletter' | 'delete';
 
-const PLOSE_PARK_ID = 'ef4ceae9-f2e2-4f8f-b681-2927c90ceb42';
-const PLOSE_PARK_NAME = 'Plose Plosebob';
+const PLOSE_PARK_ID = '3b08e092-beb5-46ec-9811-5698e86dd83a';
+const PLOSE_PARK_NAME = 'Plose';
 const PLOSE_TIMEZONE = 'Europe/Rome';
 const PLOSE_AVATAR_BUCKET =
   (import.meta.env.VITE_PLOSE_AVATAR_BUCKET as string | undefined)?.trim() || 'avatars';

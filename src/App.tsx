@@ -4,7 +4,7 @@ import { PhotoShopSection } from './components/PhotoShopSection';
 import { createEphemeralSupabaseClient, supabase } from './lib/supabase';
 import type { LeaderboardEntry } from './types/shop';
 
-const PLOSE_PARK_ID = 'ef4ceae9-f2e2-4f8f-b681-2927c90ceb42';
+const PLOSE_PARK_ID = '3b08e092-beb5-46ec-9811-5698e86dd83a';
 const PLOSE_TIMEZONE = 'Europe/Rome';
 const GUEST_LEADERBOARD_CACHE_KEY = 'plose_guest_leaderboard_v1';
 const PLOSE_AVATAR_BUCKET =
