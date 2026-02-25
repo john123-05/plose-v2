@@ -341,6 +341,7 @@ export function PhotoShopSection() {
   const promoPopupHideTimerRef = useRef<number | null>(null);
   const promoPopupEnterTimerRef = useRef<number | null>(null);
   const newsletterPromptedUserRef = useRef<string | null>(null);
+  const openPurchasedHandledRef = useRef(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [activeSettingsPanel, setActiveSettingsPanel] = useState<SettingsPanel | null>(null);
   const [shareMenuPhoto, setShareMenuPhoto] = useState<Photo | null>(null);
@@ -350,6 +351,7 @@ export function PhotoShopSection() {
   const [newsletterPopupSubmitting, setNewsletterPopupSubmitting] = useState(false);
   const [newsletterPopupThanks, setNewsletterPopupThanks] = useState(false);
   const gallerySectionRef = useRef<HTMLDivElement | null>(null);
+  const purchasedSectionRef = useRef<HTMLDivElement | null>(null);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileState, setProfileState] = useState<MessageState>(initialMessageState());
@@ -1804,6 +1806,33 @@ export function PhotoShopSection() {
 
     setShowAllGalleryPhotos(false);
   }, [currentUser, selectedDate, selectedRideId, selectedTime]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const params = new URLSearchParams(window.location.search);
+    const shouldOpenPurchased = params.get('openPurchased') === '1';
+    if (!shouldOpenPurchased) {
+      openPurchasedHandledRef.current = false;
+      return;
+    }
+
+    if (!currentUser || openPurchasedHandledRef.current) return;
+    openPurchasedHandledRef.current = true;
+    setActiveSettingsPanel(null);
+
+    window.setTimeout(() => {
+      purchasedSectionRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }, 80);
+
+    params.delete('openPurchased');
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || '#calendar'}`;
+    window.history.replaceState({}, '', nextUrl);
+  }, [currentUser]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -4296,7 +4325,7 @@ export function PhotoShopSection() {
 
             {currentUser && (
               <>
-                <div className="bg-white border border-gray-200 shadow-sm p-6 clip-corner">
+                <div ref={purchasedSectionRef} className="bg-white border border-gray-200 shadow-sm p-6 clip-corner">
                   <h3 className="text-2xl font-bold text-gray-900 mb-4">4. Gekaufte Bilder</h3>
                   {purchasedPhotos.length === 0 ? (
                     <p className="text-gray-600">Noch keine freigeschalteten Bilder vorhanden.</p>

@@ -1,5 +1,6 @@
 import { Camera, Calendar, ShoppingBag, ChevronDown, Medal, Gauge, Clock3, QrCode, Download, Share2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { ClaimPage } from './components/ClaimPage';
 import { PhotoShopSection } from './components/PhotoShopSection';
 import { createEphemeralSupabaseClient, supabase } from './lib/supabase';
 import type { LeaderboardEntry } from './types/shop';
@@ -344,8 +345,14 @@ function App() {
     const stored = window.localStorage.getItem('plose_ui_language');
     return stored === 'en' || stored === 'it' || stored === 'de' ? stored : 'de';
   });
+  const isClaimRoute =
+    typeof window !== 'undefined'
+      ? (window.location.pathname.replace(/\/+$/, '') || '/').toLowerCase() === '/claim'
+      : false;
 
   useEffect(() => {
+    if (isClaimRoute) return;
+
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
@@ -360,9 +367,10 @@ function App() {
     document.querySelectorAll('.observe-scroll').forEach((el) => observer.observe(el));
 
     return () => observer.disconnect();
-  }, []);
+  }, [isClaimRoute]);
 
   useEffect(() => {
+    if (isClaimRoute) return;
     if (!supabase) return;
     const sb = supabase;
 
@@ -529,20 +537,22 @@ function App() {
       active = false;
       window.clearInterval(timerId);
     };
-  }, []);
+  }, [isClaimRoute]);
 
   useEffect(() => {
+    if (isClaimRoute) return;
     const timer = window.setInterval(() => {
       setClockTick(Date.now());
       setLiveBadgeToggle((previous) => !previous);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [isClaimRoute]);
 
   const resetCountdown = countdownToResetAt7(PLOSE_TIMEZONE, clockTick);
   const liveBadgeLabel = liveBadgeToggle ? 'Aktuell' : 'Live';
 
   useEffect(() => {
+    if (isClaimRoute) return;
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('plose_ui_language', language);
 
@@ -554,7 +564,11 @@ function App() {
       subtree: true,
     });
     return () => mutationObserver.disconnect();
-  }, [language]);
+  }, [isClaimRoute, language]);
+
+  if (isClaimRoute) {
+    return <ClaimPage />;
+  }
 
   return (
     <div className="min-h-screen bg-white">
